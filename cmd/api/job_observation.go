@@ -149,7 +149,11 @@ func (app *application) getJobHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *application) writeJobSnapshot(w http.ResponseWriter, job *data.ImageJob) {
-	_ = app.writeJSON(w, http.StatusOK, envelope{
+	_ = app.writeJSON(w, http.StatusOK, jobSnapshot(job), nil)
+}
+
+func jobSnapshot(job *data.ImageJob) envelope {
+	return envelope{
 		"id":                 job.PublicID,
 		"image_id":           job.ImageID,
 		"status":             job.Status,
@@ -164,5 +168,5 @@ func (app *application) writeJobSnapshot(w http.ResponseWriter, job *data.ImageJ
 		"variants_completed": job.VariantsCompleted,
 		"simulation_step":    job.SimulationStep,
 		"variants":           job.Variants,
-	}, nil)
+	}
 }

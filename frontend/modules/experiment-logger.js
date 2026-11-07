@@ -1,6 +1,6 @@
-const STORAGE_KEY = 'imagelab-assessment2-client-log-v1';
+const STORAGE_KEY = 'imagelab-assessment3-client-log-v1';
 // Written into every entry so a raw log shows which frontend build produced it.
-const LOGGER_BUILD = '14';
+const LOGGER_BUILD = '15';
 
 // Entries live in memory; localStorage is only written after a run ends or on page hide.
 function readLog() {
@@ -60,6 +60,9 @@ export function beginRun(metadata) {
 		terminalVersion: null,
 		distinctNewVersions: new Set(),
 		requestsStarted: 0,
+		sseStreamOpens: 0,
+		sseJobEventsReceived: 0,
+		sseReconnectErrors: 0,
 		initial200: 0,
 		newer200: 0,
 		unchanged200: 0,
@@ -148,6 +151,58 @@ export function responseReceived(run, requestId, status, job, kind, receivedAt =
 
 export function responseRendered(run, requestId, version) {
 	append(run, 'rendered', { request_id: requestId, rendered_version: version });
+}
+
+export function sseStreamOpened(run, streamId, url) {
+	if (!run) return;
+	run.sseStreamOpens += 1;
+	append(run, 'sse_stream_open', { stream_id: streamId, url, stream_open_number: run.sseStreamOpens });
+}
+
+export function sseJobUpdateReceived(run, streamId, job, receivedAt = Date.now(), receivedPerfMs = performance.now()) {
+	if (!run) return;
+	const version = Number.isInteger(job?.version) ? job.version : null;
+	if (run.baselineVersion === null) {
+		run.baselineVersion = version;
+	} else if (version !== null && run.lastVersion !== null && version > run.lastVersion) {
+		run.distinctNewVersions.add(version);
+	}
+	if (version !== null) run.lastVersion = Math.max(run.lastVersion ?? version, version);
+	run.sseJobEventsReceived += 1;
+	const terminal = job?.status === 'completed' || job?.status === 'failed';
+	if (terminal) {
+		run.terminalVersion = version;
+		run.terminalReceiptMs = receivedAt;
+		const terminalAt = job.completed_at || job.failed_at;
+		if (job.started_at && terminalAt) run.processingMs = Date.parse(terminalAt) - Date.parse(job.started_at);
+	}
+	append(run, 'sse_job_update_received', {
+		stream_id: streamId,
+		received_version: version,
+		job_status: job?.status || '',
+		stage: job?.stage || '',
+		variants_completed: job?.variants_completed ?? null,
+		simulation_step: job?.simulation_step ?? 0,
+		started_at: job?.started_at || null,
+		completed_at: job?.completed_at || null,
+		failed_at: job?.failed_at || null,
+		client_time_ms: receivedAt,
+		performance_time_ms: receivedPerfMs,
+	});
+	if (terminal) scheduleSave();
+}
+
+export function sseReconnectStarted(run, streamId, readyState) {
+	if (!run) return;
+	run.sseReconnectErrors += 1;
+	append(run, 'sse_reconnecting', { stream_id: streamId, ready_state: readyState });
+	scheduleSave();
+}
+
+export function sseStreamClosed(run, streamId, reason, durationMs = null) {
+	if (!run) return;
+	append(run, 'sse_client_stream_closed', { stream_id: streamId, reason, duration_ms: durationMs });
+	scheduleSave();
 }
 
 export function retrievalFailed(run, requestId, detail, httpStatus = null) {

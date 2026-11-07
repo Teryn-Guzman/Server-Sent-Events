@@ -116,7 +116,7 @@ function renderJob(state) {
 			<span class="badge badge-${status}"><i class="badge-dot"></i>${status === 'unknown' ? 'Not checked' : STATUS_LABELS[job.status] || 'Queued'}</span>
 		</div>
 		<div class="job-observation-meta">
-			<span><strong>Mode</strong> ${state.mode === 'long' ? 'Long polling' : 'Short polling'}</span>
+			<span><strong>Mode</strong> ${modeLabel(state.mode)}</span>
 			<span><strong>Version</strong> ${Number.isInteger(job.version) ? job.version : '—'}</span>
 		</div>
 		<div class="job-split">
@@ -190,6 +190,19 @@ function asideHTML(state, job) {
 			<button class="try-again" type="button" data-action="try-again">Resume observation</button>
 		</div>`;
 	}
+	if (state.mode === 'sse' && state.streamStatus === 'reconnecting') {
+		return `<div class="job-aside">
+			<strong class="aside-title">Reconnecting to job stream</strong>
+			<span class="aside-note">The job continues on the server. The same stream will retry and send its latest snapshot when connected.</span>
+		</div>`;
+	}
+	if (state.mode === 'sse' && state.streamStatus === 'connecting') {
+		return `<div class="job-aside">
+			<span class="polling-dot"></span>
+			<strong class="aside-title">Connecting to job stream</strong>
+			<span class="aside-note">The server will send the current snapshot when the stream opens.</span>
+		</div>`;
+	}
 	if (job.status === 'completed') {
 		return `<div class="job-aside">
 			<strong class="aside-title is-good">Processing complete</strong>
@@ -202,10 +215,16 @@ function asideHTML(state, job) {
 			<span class="aside-note job-error">${escapeHTML(job.error || 'The image could not be processed.')}</span>
 		</div>`;
 	}
+	const title = state.mode === 'sse'
+		? 'Listening for job updates'
+		: state.mode === 'long' ? 'Waiting for a newer version' : 'Checking status automatically';
+	const note = state.mode === 'sse'
+		? 'One open event stream sends complete snapshots when the job changes.'
+		: state.mode === 'long' ? 'Held request; next request follows each response.' : 'Short poll about every 1 second after each response.';
 	return `<div class="job-aside">
 		<span class="polling-dot"></span>
-		<strong class="aside-title">${state.mode === 'long' ? 'Waiting for a newer version' : 'Checking status automatically'}</strong>
-		<span class="aside-note">${state.mode === 'long' ? 'Held request; next request follows each response.' : 'Short poll about every 1 second after each response.'}</span>
+		<strong class="aside-title">${title}</strong>
+		<span class="aside-note">${note}</span>
 		${job.status === 'queued' && job.queue_position ? `<span class="aside-note">Queue position: ${Number(job.queue_position)}</span>` : ''}
 	</div>`;
 }
@@ -217,6 +236,8 @@ function measurementsHTML(state, job) {
 	const processingMs = job.started_at && completedAt ? Date.parse(completedAt) - Date.parse(job.started_at) : null;
 	const rows = [
 		['Observation GETs started', String(measurements.requestsStarted ?? 0)],
+		['SSE stream GETs opened', String(measurements.sseStreamGets ?? 0)],
+		['SSE job-update events', String(measurements.sseEventsReceived ?? 0)],
 		['Distinct newer versions seen', String(measurements.versionsSeen ?? 0)],
 		['Terminal version', String(measurements.terminalVersion ?? '—')],
 		['Processing duration (DB timestamps)', formatDuration(processingMs)],
@@ -226,6 +247,12 @@ function measurementsHTML(state, job) {
 		<dl>${rows.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHTML(value)}</dd></div>`).join('')}</dl>
 		<span class="measurement-note">Compute detection delay by joining the client receipt log to the server post-commit log.</span>
 	</section>`;
+}
+
+function modeLabel(mode) {
+	if (mode === 'sse') return 'Server-Sent Events (SSE)';
+	if (mode === 'long') return 'Long polling';
+	return 'Short polling';
 }
 
 /* ---------- results panel ---------- */

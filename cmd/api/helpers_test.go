@@ -38,11 +38,13 @@ func TestHandlersReturn404ForMalformedIDs(t *testing.T) {
 	app := &application{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/jobs/{id}", app.getJobHandler)
+	mux.HandleFunc("GET /v1/jobs/{id}/events", app.getJobEventsHandler)
 	mux.HandleFunc("GET /v1/images/{id}/variants/{name}", app.getVariantHandler)
 
 	for _, path := range []string{
 		"/v1/jobs/abc",
 		"/v1/jobs/abc?after=1&wait=2",
+		"/v1/jobs/abc/events",
 		"/v1/images/abc/variants/thumbnail",
 	} {
 		t.Run(path, func(t *testing.T) {

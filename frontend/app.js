@@ -7,11 +7,15 @@ import {
 	responseReceived,
 	responseRendered,
 	retrievalFailed,
+	sseJobUpdateReceived,
+	sseReconnectStarted,
+	sseStreamClosed,
+	sseStreamOpened,
 	setRunJob,
 	setRunMode,
-} from './modules/experiment-logger.js?v=14';
-import { AppState } from './state.js?v=14';
-import { bindRetryUpload, bindTryAgain, render } from './render.js?v=14';
+} from './modules/experiment-logger.js?v=15';
+import { AppState } from './state.js?v=15';
+import { bindRetryUpload, bindTryAgain, render } from './render.js?v=15';
 
 const form = document.querySelector('#upload-form');
 const input = document.querySelector('#image-input');
@@ -23,6 +27,8 @@ const state = new AppState();
 let observationGeneration = 0;
 let activeController = null;
 let activeRequestId = null;
+let activeEventSource = null;
+let eventSourceSequence = 0;
 let shortPollTimer = null;
 let shortPollResolve = null;
 let requestSequence = 0;
@@ -117,7 +123,7 @@ function handleModeChange() {
 	// Cancel first so the cancelled request is logged under the mode it was started in.
 	cancelObservation('mode_switch');
 	setRunMode(activeRun, mode);
-	state.update({ mode, observing: false });
+	state.update({ mode, observing: false, streamStatus: '' });
 	if (shouldResume) void startObservation({ promptFirst: false });
 }
 
@@ -148,6 +154,7 @@ function cancelObservation(reason) {
 		activeController = null;
 		activeRequestId = null;
 	}
+	closeEventSource(reason);
 }
 
 async function startObservation({ promptFirst, firstKind = 'retry_snapshot' }) {
@@ -155,7 +162,12 @@ async function startObservation({ promptFirst, firstKind = 'retry_snapshot' }) {
 	const generation = observationGeneration;
 	const job = state.get().job;
 	if (!job?.statusUrl || isTerminal(job.status)) return;
-	state.update({ observing: true, paused: false, resultError: '' });
+	state.update({ observing: true, paused: false, streamStatus: '', resultError: '' });
+
+	if (state.get().mode === 'sse') {
+		startSSEObservation(job, generation);
+		return;
+	}
 
 	if (promptFirst) {
 		const snapshot = await requestSnapshot(null, firstKind, generation);
@@ -188,6 +200,63 @@ async function startObservation({ promptFirst, firstKind = 'retry_snapshot' }) {
 		applySnapshot(result.job, result.requestId);
 		if (isTerminal(result.job.status)) return;
 	}
+}
+
+function startSSEObservation(job, generation) {
+	const streamUrl = new URL(job.statusUrl, window.location.origin);
+	streamUrl.pathname = `${streamUrl.pathname.replace(/\/$/, '')}/events`;
+	const streamId = `sse-${++eventSourceSequence}`;
+	state.update({ streamStatus: 'connecting' });
+	let source;
+	try {
+		source = new EventSource(streamUrl.href);
+	} catch (error) {
+		state.update({ observing: false, resultError: error?.message || 'Unable to open the job event stream.' });
+		return;
+	}
+	activeEventSource = { source, streamId, openedAt: null };
+
+	source.onopen = () => {
+		if (generation !== observationGeneration || activeEventSource?.source !== source) return;
+		activeEventSource.openedAt = performance.now();
+		sseStreamOpened(activeRun, streamId, streamUrl.href);
+		state.update({ observing: true, paused: false, streamStatus: 'open', resultError: '' });
+	};
+
+	source.addEventListener('job-update', event => {
+		if (generation !== observationGeneration || activeEventSource?.source !== source) return;
+		const receivedAt = Date.now();
+		const receivedPerfMs = performance.now();
+		let snapshot;
+		try {
+			snapshot = JSON.parse(event.data);
+		} catch {
+			state.update({ streamStatus: 'reconnecting' });
+			return;
+		}
+		if (!isValidRepresentation(snapshot) || snapshot.id !== state.get().job?.id) {
+			state.update({ streamStatus: 'reconnecting' });
+			return;
+		}
+		sseJobUpdateReceived(activeRun, streamId, snapshot, receivedAt, receivedPerfMs);
+		applySnapshot(snapshot, streamId);
+		if (isTerminal(snapshot.status)) closeEventSource('terminal');
+	});
+
+	source.onerror = () => {
+		if (generation !== observationGeneration || activeEventSource?.source !== source) return;
+		sseReconnectStarted(activeRun, streamId, source.readyState);
+		state.update({ observing: true, streamStatus: 'reconnecting' });
+	};
+}
+
+function closeEventSource(reason) {
+	if (!activeEventSource) return;
+	const stream = activeEventSource;
+	activeEventSource = null;
+	stream.source.close();
+	const durationMs = stream.openedAt === null ? null : performance.now() - stream.openedAt;
+	sseStreamClosed(activeRun, stream.streamId, reason, durationMs);
 }
 
 function waitForShortPoll(generation) {
@@ -245,9 +314,12 @@ function applySnapshot(job, requestId) {
 		results: job.variants || [],
 		observing: !terminal,
 		paused: false,
+		streamStatus: '',
 		resultError: '',
 		measurements: {
 			requestsStarted: activeRun?.requestsStarted || 0,
+			sseStreamGets: activeRun?.sseStreamOpens || 0,
+			sseEventsReceived: activeRun?.sseJobEventsReceived || 0,
 			versionsSeen: activeRun?.distinctNewVersions.size || 0,
 			terminalVersion: activeRun?.terminalVersion,
 		},

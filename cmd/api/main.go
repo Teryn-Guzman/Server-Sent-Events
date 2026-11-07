@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -35,8 +36,13 @@ type application struct {
 	logger       *slog.Logger
 	models       data.Models
 	jobNotifier  *jobNotifier
+	sseJobReader jobSnapshotReader
 	wg           sync.WaitGroup
 	workerCancel context.CancelFunc
+	sseStreamSeq atomic.Uint64
+	sseMetricsMu sync.Mutex
+	activeSSE    atomic.Int64
+	peakSSE      atomic.Int64
 }
 
 func main() {
@@ -80,11 +86,13 @@ func main() {
 		"simulation_interval", cfg.simulationInterval.String(),
 	)
 
+	models := data.NewModels(db)
 	app := &application{
-		config:      cfg,
-		logger:      logger,
-		models:      data.NewModels(db),
-		jobNotifier: newJobNotifier(),
+		config:       cfg,
+		logger:       logger,
+		models:       models,
+		sseJobReader: models.Images,
+		jobNotifier:  newJobNotifier(),
 	}
 	if err := os.MkdirAll(cfg.storageDir, 0755); err != nil {
 		logger.Error(err.Error())
