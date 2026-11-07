@@ -37,13 +37,14 @@ func (app *application) processNextImageJob(ctx context.Context) (err error) {
 		}
 	}()
 
-	for _, delay := range []time.Duration{app.config.imageProcessingDelay, app.config.quietDelay} {
+	runtimeConfig := app.jobRuntimeConfig(job.PublicID)
+	for _, delay := range []time.Duration{runtimeConfig.imageProcessingDelay, runtimeConfig.quietDelay} {
 		if err := app.waitWorkerDelay(ctx, delay); err != nil {
 			app.failImageJob(context.Background(), job.ID, "processing was interrupted")
 			return err
 		}
 	}
-	if err := app.runSimulatedProgress(ctx, job.ID, job.PublicID); err != nil {
+	if err := app.runSimulatedProgress(ctx, job.ID, job.PublicID, runtimeConfig.simulationDuration, runtimeConfig.simulationInterval); err != nil {
 		app.failImageJob(context.Background(), job.ID, "processing was interrupted")
 		return err
 	}
@@ -131,8 +132,7 @@ func (app *application) waitWorkerDelay(ctx context.Context, delay time.Duration
 	}
 }
 
-func (app *application) runSimulatedProgress(ctx context.Context, jobID, publicID string) error {
-	duration, interval := app.config.simulationDuration, app.config.simulationInterval
+func (app *application) runSimulatedProgress(ctx context.Context, jobID, publicID string, duration, interval time.Duration) error {
 	if duration <= 0 || interval <= 0 {
 		return nil
 	}

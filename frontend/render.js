@@ -190,17 +190,25 @@ function asideHTML(state, job) {
 			<button class="try-again" type="button" data-action="try-again">Resume observation</button>
 		</div>`;
 	}
-	if (state.mode === 'sse' && state.streamStatus === 'reconnecting') {
+	if (state.connectionStatus === 'reconnecting' || state.streamStatus === 'reconnecting') {
+		const retrySuffix = Number.isInteger(state.retryCount) && state.retryCount > 0 ? ` Retry ${state.retryCount}.` : '';
 		return `<div class="job-aside">
 			<strong class="aside-title">Reconnecting to job stream</strong>
-			<span class="aside-note">The job continues on the server. The same stream will retry and send its latest snapshot when connected.</span>
+			<span class="aside-note">The job continues on the server.${retrySuffix} The next snapshot will resume observation automatically when the stream reconnects.</span>
+			${state.lastError ? `<span class="aside-note job-error">${escapeHTML(state.lastError)}</span>` : ''}
 		</div>`;
 	}
-	if (state.mode === 'sse' && state.streamStatus === 'connecting') {
+	if (state.connectionStatus === 'connecting' || state.streamStatus === 'connecting') {
 		return `<div class="job-aside">
 			<span class="polling-dot"></span>
 			<strong class="aside-title">Connecting to job stream</strong>
 			<span class="aside-note">The server will send the current snapshot when the stream opens.</span>
+		</div>`;
+	}
+	if (state.connectionStatus === 'stopped' && !job.status) {
+		return `<div class="job-aside">
+			<strong class="aside-title">Observation stopped</strong>
+			<span class="aside-note">The job is still running on the server. Resume to continue watching it.</span>
 		</div>`;
 	}
 	if (job.status === 'completed') {

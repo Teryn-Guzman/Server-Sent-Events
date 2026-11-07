@@ -31,18 +31,63 @@ type config struct {
 	}
 }
 
+type jobRuntimeConfig struct {
+	imageProcessingDelay time.Duration
+	quietDelay           time.Duration
+	simulationDuration   time.Duration
+	simulationInterval   time.Duration
+}
+
 type application struct {
-	config       config
-	logger       *slog.Logger
-	models       data.Models
-	jobNotifier  *jobNotifier
-	sseJobReader jobSnapshotReader
-	wg           sync.WaitGroup
-	workerCancel context.CancelFunc
-	sseStreamSeq atomic.Uint64
-	sseMetricsMu sync.Mutex
-	activeSSE    atomic.Int64
-	peakSSE      atomic.Int64
+	config                config
+	logger                *slog.Logger
+	models                data.Models
+	jobNotifier           *jobNotifier
+	sseJobReader          jobSnapshotReader
+	wg                    sync.WaitGroup
+	workerCancel          context.CancelFunc
+	sseStreamSeq          atomic.Uint64
+	sseMetricsMu          sync.Mutex
+	activeSSE             atomic.Int64
+	peakSSE               atomic.Int64
+	jobRuntimeOverrides   map[string]jobRuntimeConfig
+	jobRuntimeOverridesMu sync.Mutex
+}
+
+func (app *application) setJobRuntimeConfig(publicID string, cfg jobRuntimeConfig) {
+	app.jobRuntimeOverridesMu.Lock()
+	defer app.jobRuntimeOverridesMu.Unlock()
+	if app.jobRuntimeOverrides == nil {
+		app.jobRuntimeOverrides = make(map[string]jobRuntimeConfig)
+	}
+	app.jobRuntimeOverrides[publicID] = cfg
+}
+
+func (app *application) jobRuntimeConfig(publicID string) jobRuntimeConfig {
+	cfg := jobRuntimeConfig{
+		imageProcessingDelay: app.config.imageProcessingDelay,
+		quietDelay:           app.config.quietDelay,
+		simulationDuration:   app.config.simulationDuration,
+		simulationInterval:   app.config.simulationInterval,
+	}
+
+	app.jobRuntimeOverridesMu.Lock()
+	defer app.jobRuntimeOverridesMu.Unlock()
+	if override, ok := app.jobRuntimeOverrides[publicID]; ok {
+		if override.imageProcessingDelay >= 0 {
+			cfg.imageProcessingDelay = override.imageProcessingDelay
+		}
+		if override.quietDelay >= 0 {
+			cfg.quietDelay = override.quietDelay
+		}
+		if override.simulationDuration >= 0 {
+			cfg.simulationDuration = override.simulationDuration
+		}
+		if override.simulationInterval >= 0 {
+			cfg.simulationInterval = override.simulationInterval
+		}
+	}
+	return cfg
 }
 
 func main() {
