@@ -6,7 +6,7 @@
 	<meta name="viewport" content="width=device-width,initial-scale=1">
 	<link rel="icon" href="favicon.svg" type="image/svg+xml">
 	<title>ImageLab</title>
-	<link rel="stylesheet" href="style.css?v=13">
+	<link rel="stylesheet" href="style.css?v=14">
 </head>
 
 <body>
@@ -23,7 +23,8 @@
 
 	<main class="shell">
 		<header class="page-head">
-			<h1>Process an image</h1>
+			<p class="page-kicker">IMAGE WORKSPACE</p>
+			<h1>Create image variants</h1>
 			<p>Upload an image and generate optimized variants in the background.</p>
 		</header>
 
@@ -94,30 +95,33 @@
 					</span>
 					<h2>Processing job</h2>
 				</div>
-				<div class="assessment-controls">
-					<label>Observation mode
+				<label class="mode-control">Observation mode
 						<select id="polling-mode">
 							<option value="short">Short polling</option>
 							<option value="long">Long polling</option>
 							<option value="sse">Server-Sent Events (SSE)</option>
 						</select>
 					</label>
-					<label>Experiment condition
-						<select id="experiment-condition">
-							<option value="A">A — Quiet job</option>
-							<option value="B">B — Real progress</option>
-							<option value="C1">C1 — Slow simulated updates</option>
-							<option value="C2">C2 — Fast simulated updates</option>
-							<option value="C3">C3 — Fast updates with latency</option>
-						</select>
-					</label>
-					<label>Repetition
-						<input id="experiment-repetition" type="number" min="1" step="1" value="1">
-					</label>
-					<label>Latency configuration
-						<input id="latency-setting" type="text" value="none" maxlength="80" autocomplete="off">
-					</label>
-				</div>
+				<details class="experiment-settings">
+					<summary><span>Experiment settings</span><span class="settings-summary-note">Condition, run &amp; latency</span></summary>
+					<div class="assessment-controls">
+						<label>Experiment condition
+							<select id="experiment-condition">
+								<option value="A">A — Quiet job</option>
+								<option value="B">B — Real progress</option>
+								<option value="C1">C1 — Slow simulated updates</option>
+								<option value="C2">C2 — Fast simulated updates</option>
+								<option value="C3">C3 — Fast updates with latency</option>
+							</select>
+						</label>
+						<label>Repetition
+							<input id="experiment-repetition" type="number" min="1" step="1" value="1">
+						</label>
+						<label>Latency configuration
+							<input id="latency-setting" type="text" value="none" maxlength="80" autocomplete="off">
+						</label>
+					</div>
+				</details>
 				<div class="assessment-actions">
 					<button id="stop-observation-button" type="button" disabled>Stop observing</button>
 					<button id="download-client-logs-button" type="button">Download raw client logs</button>
