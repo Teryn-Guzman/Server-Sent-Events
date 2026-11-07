@@ -102,7 +102,7 @@
 							<option value="sse">Server-Sent Events (SSE)</option>
 						</select>
 					</label>
-				<details class="experiment-settings">
+				<details class="experiment-settings" open>
 					<summary><span>Experiment settings</span><span class="settings-summary-note">Condition, run &amp; latency</span></summary>
 					<div class="assessment-controls">
 						<label>Experiment condition
@@ -117,6 +117,18 @@
 						<label>Repetition
 							<input id="experiment-repetition" type="number" min="1" step="1" value="1">
 						</label>
+						<label>Processing delay (ms)
+							<input id="delay-ms" type="number" min="0" step="100" value="0" inputmode="numeric">
+						</label>
+						<label>Quiet delay (ms)
+							<input id="quiet-delay-ms" type="number" min="0" step="100" value="0" inputmode="numeric">
+						</label>
+						<label>Simulation duration (ms)
+							<input id="simulation-duration-ms" type="number" min="0" step="100" value="0" inputmode="numeric">
+						</label>
+						<label>Simulation interval (ms)
+							<input id="simulation-interval-ms" type="number" min="0" step="50" value="0" inputmode="numeric">
+						</label>
 						<label>Latency configuration
 							<input id="latency-setting" type="text" value="none" maxlength="80" autocomplete="off">
 						</label>
@@ -126,7 +138,8 @@
 					<button id="stop-observation-button" type="button" disabled>Stop observing</button>
 					<button id="download-client-logs-button" type="button">Download raw client logs</button>
 				</div>
-				<p class="assessment-hint">The quiet delay and simulated progress are server flags, disabled by default. Record the actual latency setup for every run.</p>
+				<div id="run-status" class="run-status" aria-live="polite">Default server settings active.</div>
+				<p class="assessment-hint">Set a per-run delay directly in the UI, or leave values at 0 to use the server defaults. Record the actual latency setup for every run.</p>
 				<div id="job-card" class="job-body"></div>
 			</section>
 		</div>

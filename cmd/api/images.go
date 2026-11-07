@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/teryn-guzman/gatekeeper-asynchronous/internal/data"
 )
@@ -28,6 +30,7 @@ var (
 	errEmptyImage         = errors.New("image file is empty")
 	errImageTooLarge      = errors.New("image must be no larger than 10 MB")
 	errUnsupportedImage   = errors.New("only JPEG and PNG images are supported")
+	errInvalidDelayConfig = errors.New("delay values must be zero or a valid Go duration such as 250ms, 2s, or 1m")
 )
 
 // temporarily stores information about the uploaded image before it is saved
@@ -76,6 +79,12 @@ func (app *application) createImageHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	runtimeConfig, err := app.parseJobRuntimeConfig(r)
+	if err != nil {
+		app.badRequestResponse(w, r, err)
+		return
+	}
+
 	// A file identified as JPEG or PNG is stored and queued even if its bytes
 	// are corrupt. The worker performs the decode so the failure becomes a
 	// durable job result instead of disappearing during upload acceptance.
@@ -105,6 +114,7 @@ func (app *application) createImageHandler(w http.ResponseWriter, r *http.Reques
 		app.serverErrorResponse(w, r, err)
 		return
 	}
+	app.setJobRuntimeConfig(job.PublicID, runtimeConfig)
 	app.logJobCommit(data.JobCommit{PublicID: job.PublicID, Version: job.Version, Status: job.Status, Stage: job.Stage, VariantsCompleted: job.VariantsCompleted, SimulationStep: job.SimulationStep}, "accepted")
 
 	//creates the URL where the client can check the job's status.
@@ -125,6 +135,59 @@ func (app *application) createImageHandler(w http.ResponseWriter, r *http.Reques
 // parseUploadedImage validates the multipart payload before durable work is created.
 // It accepts files identified as JPEG or PNG without decoding them. The
 // worker owns decode validation so corrupt uploads remain observable jobs.
+func (app *application) parseJobRuntimeConfig(r *http.Request) (jobRuntimeConfig, error) {
+	cfg := jobRuntimeConfig{
+		imageProcessingDelay: app.config.imageProcessingDelay,
+		quietDelay:           app.config.quietDelay,
+		simulationDuration:   app.config.simulationDuration,
+		simulationInterval:   app.config.simulationInterval,
+	}
+
+	for _, pair := range []struct {
+		key    string
+		getter func() string
+		setter func(time.Duration)
+	}{
+		{key: "delay_ms", getter: func() string { return r.FormValue("delay_ms") }, setter: func(v time.Duration) { cfg.imageProcessingDelay = v }},
+		{key: "delay", getter: func() string { return r.FormValue("delay") }, setter: func(v time.Duration) { cfg.imageProcessingDelay = v }},
+		{key: "quiet_delay_ms", getter: func() string { return r.FormValue("quiet_delay_ms") }, setter: func(v time.Duration) { cfg.quietDelay = v }},
+		{key: "quiet_delay", getter: func() string { return r.FormValue("quiet_delay") }, setter: func(v time.Duration) { cfg.quietDelay = v }},
+		{key: "simulation_duration_ms", getter: func() string { return r.FormValue("simulation_duration_ms") }, setter: func(v time.Duration) { cfg.simulationDuration = v }},
+		{key: "simulation_duration", getter: func() string { return r.FormValue("simulation_duration") }, setter: func(v time.Duration) { cfg.simulationDuration = v }},
+		{key: "simulation_interval_ms", getter: func() string { return r.FormValue("simulation_interval_ms") }, setter: func(v time.Duration) { cfg.simulationInterval = v }},
+		{key: "simulation_interval", getter: func() string { return r.FormValue("simulation_interval") }, setter: func(v time.Duration) { cfg.simulationInterval = v }},
+	} {
+		value := strings.TrimSpace(pair.getter())
+		if value == "" {
+			continue
+		}
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			if _, errInt := strconv.Atoi(value); errInt == nil {
+				parsed = time.Duration(0)
+				parsed = time.Duration(0)
+				if value != "0" {
+					parsed, err = time.ParseDuration(value + "ms")
+				}
+			}
+		}
+		if err != nil {
+			return jobRuntimeConfig{}, errInvalidDelayConfig
+		}
+		if parsed < 0 {
+			return jobRuntimeConfig{}, errInvalidDelayConfig
+		}
+		pair.setter(parsed)
+	}
+	if cfg.simulationDuration > 0 && cfg.simulationInterval <= 0 {
+		return jobRuntimeConfig{}, errInvalidDelayConfig
+	}
+	if cfg.simulationInterval > 0 && cfg.simulationDuration <= 0 {
+		return jobRuntimeConfig{}, errInvalidDelayConfig
+	}
+	return cfg, nil
+}
+
 func (app *application) parseUploadedImage(r *http.Request) (uploadedImage, error) {
 	if err := r.ParseMultipartForm(maxRequestSize); err != nil {
 		return uploadedImage{}, errInvalidImageUpload

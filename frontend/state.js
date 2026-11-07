@@ -12,6 +12,10 @@ const initialState = {
 	observing: false,
 	paused: false,
 	streamStatus: '',
+	connectionStatus: 'idle',
+	lastUpdatedAt: null,
+	lastError: '',
+	retryCount: 0,
 	mode: 'short',
 	measurements: null,
 	choosingDifferentImage: false,
@@ -33,6 +37,6 @@ export class AppState extends EventEmitter {
 	}
 
 	resetJob() {
-		this.update({ job: null, results: [], resultError: '', submitError: '', observing: false, paused: false, streamStatus: '', measurements: null });
+		this.update({ job: null, results: [], resultError: '', submitError: '', observing: false, paused: false, streamStatus: '', connectionStatus: 'idle', lastUpdatedAt: null, lastError: '', retryCount: 0, measurements: null });
 	}
 }

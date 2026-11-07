@@ -1,8 +1,12 @@
 const acceptedStatus = 202;
 
-export async function uploadImage(file) {
+export async function uploadImage(file, runConfig = {}) {
 	const body = new FormData();
 	body.append('image', file);
+	body.append('delay_ms', String(runConfig.delayMs ?? 0));
+	body.append('quiet_delay_ms', String(runConfig.quietDelayMs ?? 0));
+	body.append('simulation_duration_ms', String(runConfig.simulationDurationMs ?? 0));
+	body.append('simulation_interval_ms', String(runConfig.simulationIntervalMs ?? 0));
 
 	const response = await fetch('/v1/images', { method: 'POST', body });
 	const data = await readJson(response);

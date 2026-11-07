@@ -23,6 +23,7 @@ const changeImageButton = document.querySelector('#change-image-button');
 const modeSelect = document.querySelector('#polling-mode');
 const stopObservationButton = document.querySelector('#stop-observation-button');
 const downloadLogsButton = document.querySelector('#download-client-logs-button');
+const runStatus = document.querySelector('#run-status');
 const state = new AppState();
 let observationGeneration = 0;
 let activeController = null;
@@ -33,9 +34,12 @@ let shortPollTimer = null;
 let shortPollResolve = null;
 let requestSequence = 0;
 let activeRun = null;
+let sseReconnectTimer = null;
+let sseRetryCount = 0;
 
 state.on('change', nextState => {
 	render(nextState);
+	updateRunStatus();
 	bindTryAgain(resumeObservation);
 	bindRetryUpload(() => attemptUpload(state.get().file));
 });
@@ -51,6 +55,61 @@ modeSelect.addEventListener('change', handleModeChange);
 stopObservationButton.addEventListener('click', stopObserving);
 downloadLogsButton.addEventListener('click', downloadClientLog);
 window.addEventListener('beforeunload', () => cancelObservation('page_unload'));
+for (const selector of ['#delay-ms', '#quiet-delay-ms', '#simulation-duration-ms', '#simulation-interval-ms']) {
+	document.querySelector(selector)?.addEventListener('input', updateRunStatus);
+}
+updateRunStatus();
+
+function getRunDelayConfig() {
+	return {
+		delayMs: Number(document.querySelector('#delay-ms').value || 0),
+		quietDelayMs: Number(document.querySelector('#quiet-delay-ms').value || 0),
+		simulationDurationMs: Number(document.querySelector('#simulation-duration-ms').value || 0),
+		simulationIntervalMs: Number(document.querySelector('#simulation-interval-ms').value || 0),
+	};
+}
+
+function updateRunStatus() {
+	const config = getRunDelayConfig();
+	const parts = [];
+	if (config.delayMs > 0) parts.push(`processing ${config.delayMs}ms`);
+	if (config.quietDelayMs > 0) parts.push(`quiet ${config.quietDelayMs}ms`);
+	if (config.simulationDurationMs > 0 || config.simulationIntervalMs > 0) {
+		parts.push(`simulated ${config.simulationDurationMs || 0}ms / ${config.simulationIntervalMs || 0}ms`);
+	}
+	const current = state.get();
+	const statusParts = [];
+	if (current.connectionStatus === 'reconnecting') {
+		statusParts.push(`reconnecting (${current.retryCount || 1})`);
+	} else if (current.connectionStatus === 'connecting') {
+		statusParts.push('connecting');
+	} else if (current.connectionStatus === 'open') {
+		statusParts.push('connected');
+	} else if (current.connectionStatus === 'stopped') {
+		statusParts.push('stopped');
+	} else if (current.connectionStatus === 'failed') {
+		statusParts.push('failed');
+	}
+	if (current.lastError) statusParts.push(current.lastError);
+	if (runStatus) {
+		const runtimeStatus = parts.length ? `Custom runtime settings: ${parts.join(' • ')}` : 'Default server settings active.';
+		const connectionStatus = statusParts.length ? `Connection: ${statusParts.join(' • ')}` : 'Connection: idle';
+		runStatus.textContent = `${runtimeStatus} | ${connectionStatus}`;
+	}
+}
+
+function validateRunDelayConfig(config) {
+	if ([config.delayMs, config.quietDelayMs, config.simulationDurationMs, config.simulationIntervalMs].some(value => Number.isNaN(value) || value < 0)) {
+		return 'Delay values must be zero or a positive number of milliseconds.';
+	}
+	if (config.simulationDurationMs > 0 && config.simulationIntervalMs <= 0) {
+		return 'Simulation interval must be greater than zero when simulation duration is set.';
+	}
+	if (config.simulationIntervalMs > 0 && config.simulationDurationMs <= 0) {
+		return 'Simulation duration must be greater than zero when simulation interval is set.';
+	}
+	return null;
+}
 
 function chooseDifferentImage() {
 	state.update({ choosingDifferentImage: true });
@@ -81,6 +140,12 @@ function handleFileSelection() {
 async function attemptUpload(file) {
 	const current = state.get();
 	if (current.isSubmitting || current.job || !file || current.uploadError) return;
+	const runConfig = getRunDelayConfig();
+	const validationError = validateRunDelayConfig(runConfig);
+	if (validationError) {
+		state.update({ submitError: validationError, job: null, isSubmitting: false });
+		return;
+	}
 	cancelObservation('new_upload');
 	state.update({
 		isSubmitting: true,
@@ -99,7 +164,7 @@ async function attemptUpload(file) {
 	};
 
 	try {
-		const accepted = await uploadImage(file);
+		const accepted = await uploadImage(file, runConfig);
 		activeRun = beginRun({ ...runSettings, mode: state.get().mode });
 		setRunJob(activeRun, accepted.job_id);
 		const job = { id: accepted.job_id, statusUrl: accepted.status_url, status: accepted.status };
@@ -148,6 +213,10 @@ function cancelObservation(reason) {
 		shortPollResolve?.(false);
 		shortPollResolve = null;
 	}
+	if (sseReconnectTimer) {
+		clearTimeout(sseReconnectTimer);
+		sseReconnectTimer = null;
+	}
 	if (activeController) {
 		requestCancelled(activeRun, activeRequestId, reason);
 		activeController.abort(reason);
@@ -155,6 +224,10 @@ function cancelObservation(reason) {
 		activeRequestId = null;
 	}
 	closeEventSource(reason);
+	if (reason !== 'page_unload') {
+		state.update({ connectionStatus: 'stopped', lastError: reason === 'user_stopped' ? 'Observation stopped by the user.' : 'Observation cancelled.', retryCount: 0 });
+	}
+	updateRunStatus();
 }
 
 async function startObservation({ promptFirst, firstKind = 'retry_snapshot' }) {
@@ -162,7 +235,7 @@ async function startObservation({ promptFirst, firstKind = 'retry_snapshot' }) {
 	const generation = observationGeneration;
 	const job = state.get().job;
 	if (!job?.statusUrl || isTerminal(job.status)) return;
-	state.update({ observing: true, paused: false, streamStatus: '', resultError: '' });
+	state.update({ observing: true, paused: false, streamStatus: '', connectionStatus: 'connecting', retryCount: 0, lastError: '', resultError: '' });
 
 	if (state.get().mode === 'sse') {
 		startSSEObservation(job, generation);
@@ -206,21 +279,23 @@ function startSSEObservation(job, generation) {
 	const streamUrl = new URL(job.statusUrl, window.location.origin);
 	streamUrl.pathname = `${streamUrl.pathname.replace(/\/$/, '')}/events`;
 	const streamId = `sse-${++eventSourceSequence}`;
-	state.update({ streamStatus: 'connecting' });
+	state.update({ streamStatus: 'connecting', connectionStatus: 'connecting', lastError: '', retryCount: sseRetryCount });
 	let source;
 	try {
 		source = new EventSource(streamUrl.href);
 	} catch (error) {
-		state.update({ observing: false, resultError: error?.message || 'Unable to open the job event stream.' });
+		state.update({ observing: false, resultError: error?.message || 'Unable to open the job event stream.', connectionStatus: 'failed', lastError: 'Unable to open the job event stream.' });
 		return;
 	}
 	activeEventSource = { source, streamId, openedAt: null };
 
 	source.onopen = () => {
 		if (generation !== observationGeneration || activeEventSource?.source !== source) return;
+		sseRetryCount = 0;
 		activeEventSource.openedAt = performance.now();
 		sseStreamOpened(activeRun, streamId, streamUrl.href);
-		state.update({ observing: true, paused: false, streamStatus: 'open', resultError: '' });
+		state.update({ observing: true, paused: false, streamStatus: 'open', connectionStatus: 'open', lastUpdatedAt: Date.now(), retryCount: 0, lastError: '', resultError: '' });
+		updateRunStatus();
 	};
 
 	source.addEventListener('job-update', event => {
@@ -231,11 +306,11 @@ function startSSEObservation(job, generation) {
 		try {
 			snapshot = JSON.parse(event.data);
 		} catch {
-			state.update({ streamStatus: 'reconnecting' });
+			state.update({ streamStatus: 'reconnecting', connectionStatus: 'reconnecting', lastError: 'Received a malformed job update. Reconnecting to resume observation.', retryCount: sseRetryCount || 1 });
 			return;
 		}
 		if (!isValidRepresentation(snapshot) || snapshot.id !== state.get().job?.id) {
-			state.update({ streamStatus: 'reconnecting' });
+			state.update({ streamStatus: 'reconnecting', connectionStatus: 'reconnecting', lastError: 'The stream returned an unexpected snapshot. Reconnecting to resume observation.', retryCount: sseRetryCount || 1 });
 			return;
 		}
 		sseJobUpdateReceived(activeRun, streamId, snapshot, receivedAt, receivedPerfMs);
@@ -245,8 +320,17 @@ function startSSEObservation(job, generation) {
 
 	source.onerror = () => {
 		if (generation !== observationGeneration || activeEventSource?.source !== source) return;
+		sseRetryCount += 1;
+		const retryDelayMs = Math.min(1000 * (2 ** Math.min(sseRetryCount - 1, 5)), 15000);
 		sseReconnectStarted(activeRun, streamId, source.readyState);
-		state.update({ observing: true, streamStatus: 'reconnecting' });
+		state.update({ observing: true, streamStatus: 'reconnecting', connectionStatus: 'reconnecting', lastUpdatedAt: Date.now(), lastError: `Connection dropped. Retrying in ${Math.ceil(retryDelayMs / 1000)}s.`, retryCount: sseRetryCount });
+		updateRunStatus();
+		if (sseReconnectTimer) clearTimeout(sseReconnectTimer);
+		sseReconnectTimer = setTimeout(() => {
+			if (generation !== observationGeneration || !state.get().job || isTerminal(state.get().job.status) || state.get().mode !== 'sse') return;
+			closeEventSource('retry');
+			startSSEObservation(state.get().job, generation);
+		}, retryDelayMs);
 	};
 }
 
@@ -257,6 +341,10 @@ function closeEventSource(reason) {
 	stream.source.close();
 	const durationMs = stream.openedAt === null ? null : performance.now() - stream.openedAt;
 	sseStreamClosed(activeRun, stream.streamId, reason, durationMs);
+	if (reason === 'terminal' || reason === 'user_stopped' || reason === 'mode_switch' || reason === 'observation_restarted') {
+		state.update({ connectionStatus: 'stopped', lastError: reason === 'terminal' ? 'Job reached a terminal state.' : 'Observation stopped.', retryCount: 0 });
+		updateRunStatus();
+	}
 }
 
 function waitForShortPoll(generation) {
@@ -296,6 +384,14 @@ async function requestSnapshot(after, kind, generation) {
 		const detail = timedOut
 			? 'client_timeout_30s'
 			: (error?.message || error?.name || (typeof error === 'string' && error) || 'request failed');
+		state.update({
+			connectionStatus: timedOut ? 'failed' : 'reconnecting',
+			lastUpdatedAt: Date.now(),
+			lastError: timedOut
+				? 'Request timed out after 30 seconds. The job is still running; observation will resume automatically.'
+				: 'Status request failed. Retrying with the same job.',
+			retryCount: (state.get().retryCount || 0) + 1,
+		});
 		retrievalFailed(activeRun, requestId, detail, error?.status || null);
 		return { error, requestId };
 	} finally {
@@ -315,6 +411,9 @@ function applySnapshot(job, requestId) {
 		observing: !terminal,
 		paused: false,
 		streamStatus: '',
+		connectionStatus: terminal ? 'stopped' : 'open',
+		lastUpdatedAt: Date.now(),
+		lastError: '',
 		resultError: '',
 		measurements: {
 			requestsStarted: activeRun?.requestsStarted || 0,
