@@ -8,8 +8,9 @@ one in-process worker generates image variants independently of the upload
 request.
 
 The API returns `202 Accepted` when the original image and queued job have been
-stored. The browser can observe the job with one-second short polling or
-version-based long polling until the job is `completed` or `failed`.
+stored. The browser can observe the job with one-second short polling,
+version-based long polling, or a Server-Sent Events (SSE) stream until the job
+is `completed` or `failed`.
 
 ## Requirements
 
@@ -79,8 +80,8 @@ The API serves the frontend from `frontend/`, so do not open
 3. Click **Process image** once.
 4. `POST /v1/images` validates and stores the original image, creates a queued
    PostgreSQL job, and returns `202 Accepted`.
-5. The browser fetches an initial job snapshot, then observes using the selected
-  short-poll or long-poll mode.
+5. The browser observes the job using the selected mode: short polling, long
+   polling, or SSE (see Assessment 3 below).
 6. The worker claims the queued job, creates all three variants, records their
    metadata, and marks the job `completed`.
 7. The browser stops polling and displays the generated images.
@@ -154,6 +155,83 @@ analyzer command and the run notes.
 this repository, tagged `assessment1-baseline`. It contains the Assessment 1
 application that Assessment 2 extends.
 
+## Assessment 3: Server-Sent Events
+
+SSE is a third way to observe a job. Short polling and long polling still work.
+The upload, durable job, single worker, three variants and all-or-complete
+results are unchanged; only the way the browser learns about job changes is new.
+
+### Mode selection
+
+Choose **Server-Sent Events (SSE)** in the *Observation mode* dropdown before
+clicking **Process image**. Switching modes after a job is accepted observes the
+same job and never uploads again. **Stop observing** closes the stream and the
+page shows **Resume observation**, which opens one new stream for the same job.
+Stopping observation never stops the worker.
+
+### Endpoint
+
+```http
+GET /v1/jobs/{id}/events
+Accept: text/event-stream
+```
+
+- Unknown or malformed job IDs return `404` before any stream begins.
+- Responses use `Content-Type: text/event-stream; charset=utf-8`, `Cache-Control:
+  no-cache` and `X-Accel-Buffering: no`.
+- On connection the server immediately sends the current complete job snapshot,
+  then another complete snapshot each time it observes a newer committed version.
+  A snapshot is not a delta; a slow observer may skip intermediate versions.
+- Each frame is flushed and ends with a blank line:
+
+```text
+event: job-update
+data: {"id":"...","status":"processing","version":3,"stage":"thumbnail_ready","variants_completed":1,...}
+
+```
+
+- After the terminal (`completed` or `failed`) snapshot the server ends the stream
+  and the browser calls `EventSource.close()`.
+- An idle stream receives a `: heartbeat` comment every 15 seconds. A heartbeat is
+  not a job event and does not change the job version. It also resets the response
+  write deadline so the 25 s HTTP write timeout does not cut off a quiet job.
+- No `id:` fields are sent and there is no `Last-Event-ID` replay. A reconnecting
+  `EventSource` makes a new GET and receives the latest snapshot.
+
+Try it from a terminal (`-N` turns off curl's buffering so frames appear as they
+are flushed):
+
+```bash
+curl -N http://localhost:4000/v1/jobs/JOB_ID/events
+```
+
+### How a change reaches every tab
+
+The worker commits a new version to PostgreSQL, then publishes an in-process
+wake-up to every stream subscribed to that job. A wake-up only means "read again":
+each handler re-reads the job from PostgreSQL and sends it only if its version is
+newer than the last one sent on that stream. Each handler subscribes before its
+first read, so a commit cannot fall between the read and the wait.
+
+### Disconnects and shutdown
+
+- If the connection drops, the browser keeps the same `EventSource`, shows
+  *Reconnecting to job stream*, and receives the latest snapshot when it
+  reconnects. The job is never marked failed because of a connection problem.
+- If the browser gives up (the stream reaches `CLOSED`, for example after a
+  `404`/`500` on reconnect), the page shows **Unable to check status** with **Try
+  again**, which opens one new stream for the same job.
+- Closing a stream, or shutting the server down with Ctrl+C, ends only the
+  observation handlers; the worker and the job are unaffected. On shutdown every
+  open stream returns immediately instead of holding the server open.
+
+### Experiment
+
+The SSE vs long-polling comparison (conditions A, B and C2, three repetitions
+each, 18 runs) is documented in [experiments/v3/README.md](experiments/v3/README.md),
+including server flags, log capture and the analyzer command. Assessment 2 files
+under `experiments/` are kept unchanged.
+
 ## HTTP API
 
 ### Upload an image
@@ -192,6 +270,16 @@ A completed job includes metadata for `thumbnail`, `preview`, and `display`.
 Variant metadata is returned only once the job is completed; before that,
 progress is reported through `variants_completed` and `stage`. A malformed or
 unknown job ID returns 404.
+
+### Observe a job with SSE
+
+```text
+GET /v1/jobs/{id}/events
+```
+
+Streams `job-update` events as described in
+[Assessment 3: Server-Sent Events](#assessment-3-server-sent-events). A
+malformed or unknown ID returns 404.
 
 ### Retrieve a variant
 
@@ -338,6 +426,34 @@ burst instead of waiting for it to finish.
    **Retry upload** button. Restart the server (or go back online) and click
    it; it must resubmit the same selected file without reselecting it.
 
+### 7. SSE checks (browser)
+
+1. Start the server with `make run/api image_processing_delay=10s`, open
+   `http://localhost:4000`, and choose **Server-Sent Events (SSE)**.
+2. Process an image. In DevTools **Network**, select the `/events` request and
+   open its **EventStream** tab: one request stays pending and `job-update`
+   frames arrive as the job changes, with no repeated GETs.
+3. Watch the same job from a second observer. The page only observes jobs it
+   uploaded itself, so open a second browser tab, open its DevTools **Console**
+   and run (with the real job ID):
+
+   ```js
+   const es = new EventSource('/v1/jobs/JOB_ID/events');
+   es.addEventListener('job-update', e => { const j = JSON.parse(e.data); console.log(j.version, j.status, j.stage); });
+   ```
+
+   or run `curl -N http://localhost:4000/v1/jobs/JOB_ID/events` in a terminal.
+   Both observers receive every update for the job.
+4. Toggle DevTools Network **Offline** then **Online** while the job runs. The
+   page shows **Reconnecting to job stream**, the same stream reconnects, the
+   latest snapshot arrives, and the job is not marked failed.
+5. Click **Stop observing**. The stream closes, **Observation stopped** appears,
+   and the job still reaches `completed` on the server (check with
+   `curl http://localhost:4000/v1/jobs/JOB_ID`). **Resume observation** opens a
+   new stream for the same job without another POST.
+6. Let a job finish while observing: the final snapshot renders once, the
+   stream closes, and no reconnect request follows.
+
 ## Validation and troubleshooting
 
 Run the Go tests and frontend syntax check:
@@ -361,4 +477,5 @@ the browser before it reached the API. Check that the selected file is a JPEG
 or PNG under 10 MB and that **Process image** is enabled.
 
 The application intentionally uses one worker, PostgreSQL, local filesystem
-storage, ordinary HTTP polling, and vanilla JavaScript for Version 1.
+storage, HTTP polling, long polling, Server-Sent Events, and vanilla JavaScript.
+It has no WebSockets, message broker, or multi-server fan-out.
