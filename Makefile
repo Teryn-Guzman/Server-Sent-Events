@@ -27,7 +27,7 @@ confirm:
 ## run/api: run the cmd/api application
 .PHONY: run/api
 run/api:
-	go run ./cmd/api -db-dsn=${GATEKEEPER_DB_DSN} -image-processing-delay=${image_processing_delay} -quiet-delay=${quiet_delay} -simulation-duration=${simulation_duration} -simulation-interval=${simulation_interval}
+	@go run ./cmd/api -db-dsn=${GATEKEEPER_DB_DSN} -image-processing-delay=${image_processing_delay} -quiet-delay=${quiet_delay} -simulation-duration=${simulation_duration} -simulation-interval=${simulation_interval}
 
 ## db/psql: connect to the database using psql
 .PHONY: db/psql
