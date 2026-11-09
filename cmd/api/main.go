@@ -37,6 +37,10 @@ type application struct {
 	models       data.Models
 	jobNotifier  *jobNotifier
 	sseJobReader jobSnapshotReader
+	// shutdownCh is closed once when the HTTP server begins shutting down so
+	// long-lived SSE handlers return instead of holding Shutdown open.
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
 	wg           sync.WaitGroup
 	workerCancel context.CancelFunc
 	sseStreamSeq atomic.Uint64
@@ -93,6 +97,7 @@ func main() {
 		models:       models,
 		sseJobReader: models.Images,
 		jobNotifier:  newJobNotifier(),
+		shutdownCh:   make(chan struct{}),
 	}
 	if err := os.MkdirAll(cfg.storageDir, 0755); err != nil {
 		logger.Error(err.Error())
