@@ -5,9 +5,16 @@ import argparse
 import csv
 import json
 import statistics
+import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+
+if sys.version_info < (3, 11):
+    raise SystemExit(
+        "analyze.py needs Python 3.11 or newer: Go logs nanosecond RFC 3339 timestamps "
+        "that older versions of datetime.fromisoformat cannot parse."
+    )
 
 CONDITIONS = ["A", "B", "C2"]
 METHODS = ["long", "sse"]
@@ -56,11 +63,37 @@ def median_range(values):
     return f"{statistics.median(values):g} ({min(values):g}–{max(values):g})"
 
 
-def summarize(client_records, server_records):
+def find_excluded_runs(client_runs, prefixes):
+    """Map each --exclude-job prefix to exactly one client run_id."""
+    excluded = {}
+    for prefix in prefixes:
+        if len(prefix) < 8:
+            raise SystemExit(f"--exclude-job {prefix!r}: use at least 8 characters of the job ID.")
+        matches = sorted({
+            run_id for run_id, events in client_runs.items()
+            if any(str(event.get("job_id", "")).startswith(prefix) for event in events)
+        })
+        if len(matches) != 1:
+            raise SystemExit(f"--exclude-job {prefix!r} must match exactly one run; matched {len(matches)}.")
+        excluded[matches[0]] = prefix
+    return excluded
+
+
+def summarize(client_records, server_records, exclude_prefixes=()):
     client_runs = defaultdict(list)
     for record in client_records:
         if record.get("run_id"):
             client_runs[record["run_id"]].append(record)
+    excluded_ids = find_excluded_runs(client_runs, exclude_prefixes)
+    excluded_runs = []
+    for run_id in excluded_ids:
+        events = client_runs.pop(run_id)
+        first = next((event for event in events if event.get("job_id")), events[0])
+        excluded_runs.append({
+            "job_id": first.get("job_id", ""), "condition": first.get("condition", ""),
+            "mode": first.get("mode", ""), "repetition": first.get("repetition", ""),
+            "events": len(events),
+        })
     server_by_job = defaultdict(list)
     for record in server_records:
         if record.get("job_id"):
@@ -120,13 +153,10 @@ def summarize(client_records, server_records):
         stream_close_records = [event for event in server_events if event.get("msg") == "sse stream closed"]
         heartbeat_records = [event for event in server_events if event.get("msg") == "sse heartbeat"]
         sent_sse_events = sum(event.get("msg") == "sse job-update sent" for event in server_events)
-        stream_request_path = f"/v1/jobs/{job_id}/events"
-        stream_gets = sum(
-            event.get("msg") == "request started"
-            and event.get("method") == "GET"
-            and str(event.get("uri", "")).split("?", 1)[0] == stream_request_path
-            for event in server_events
-        )
+        # The server's 'request started' log has no job_id, so it can never be joined to a
+        # run. Each opened stream logs 'sse stream opened' with its job_id: count those.
+        stream_gets = len(stream_open_records)
+        client_stream_opens = sum(event.get("event") == "sse_stream_open" for event in events)
         reads = sum(int(event.get("queries", 0)) for event in server_events if event.get("msg") == "observation database reads")
         reads += sum(int(event.get("database_reads", 0)) for event in stream_close_records)
         stream_seconds = sum(float(event.get("duration_ms", 0)) for event in stream_close_records) / 1000
@@ -149,8 +179,10 @@ def summarize(client_records, server_records):
         }
         if any(event.get("request_id") not in completed_ids for event in poll_requests):
             notes.append("poll request still pending at log end")
-        if mode == "sse" and len(stream_open_records) < stream_gets:
-            notes.append("stream did not open for every SSE GET")
+        if mode == "sse" and stream_gets == 0:
+            notes.append("no server 'sse stream opened' record found for this job")
+        if mode == "sse" and stream_gets != client_stream_opens:
+            notes.append(f"server opened {stream_gets} stream(s), client logged {client_stream_opens}")
         if mode == "sse" and len(stream_close_records) < len(stream_open_records):
             notes.append("stream close record missing")
         received_sse_events = sum(event.get("event") == "sse_job_update_received" for event in events)
@@ -192,7 +224,7 @@ def summarize(client_records, server_records):
             "peak_active_streams": peak_streams,
             "notes": "; ".join(notes),
         })
-    return output, ignored_runs
+    return output, ignored_runs, excluded_runs
 
 
 def write_svg(path, title, metric, y_label, rows):
@@ -275,11 +307,13 @@ def main():
     parser.add_argument("--client", required=True, help="Assessment 3 client JSONL download")
     parser.add_argument("--server", required=True, help="Assessment 3 server JSONL capture")
     parser.add_argument("--out-dir", default="experiments/v3/results")
+    parser.add_argument("--exclude-job", action="append", default=[], metavar="JOB_ID_PREFIX",
+                        help="leave one run out of the analysis (at least 8 characters of its job ID, repeatable); raw logs are never modified")
     args = parser.parse_args()
 
     client, client_skipped = read_jsonl(args.client)
     server, server_skipped = read_jsonl(args.server)
-    rows, ignored_runs = summarize(client, server)
+    rows, ignored_runs, excluded_runs = summarize(client, server, args.exclude_job)
     if not rows:
         raise SystemExit("No client run records found for conditions A/B/C2 and methods long/SSE.")
     output = Path(args.out_dir)
@@ -296,6 +330,14 @@ def main():
         f"Included comparison runs: {len(rows)}. Ignored client runs outside conditions A/B/C2 and methods long/SSE: {ignored_runs}.",
         "Counts represent HTTP requests/streams, not TCP connection establishments. SSE heartbeat comments are counted from server logs; they are not job-update events.",
         "",
+        *([
+            "Runs excluded at the operator's request (raw logs unchanged):",
+            "",
+            "| Job | Condition | Method | Rep | Client events |",
+            "|---|---|---|---:|---:|",
+            *["| {job_id} | {condition} | {mode} | {repetition} | {events} |".format(**run) for run in excluded_runs],
+            "",
+        ] if excluded_runs else []),
         "## Run-by-run measurements",
         "",
         "| Run | Condition | Method | Rep | Job | Observation GETs | SSE stream GETs | Job events | Heartbeats | Versions received | Gaps | Processing (ms) | Detection (ms) | DB reads | Stream (s) | Peak streams | Notes |",
