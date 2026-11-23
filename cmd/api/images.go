@@ -154,7 +154,7 @@ func (app *application) parseUploadedImage(r *http.Request) (uploadedImage, erro
 		return uploadedImage{}, errImageTooLarge
 	}
 
-	// Byte-sniffing is charge of choosing the
+	// Byte-sniffing is in charge of choosing the
 	// actual type; the header is a weaker fallback, and the extension supplies
 	// the type only when neither sniffing nor the header identified it.
 	var extContentType string

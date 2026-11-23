@@ -122,7 +122,9 @@ function handleModeChange() {
 	const shouldResume = current.job && !isTerminal(current.job.status) && current.observing;
 	// Cancel first so the cancelled request is logged under the mode it was started in.
 	cancelObservation('mode_switch');
-	setRunMode(activeRun, mode);
+	// Only log a mode change on a run that is still active. After a run ends (or
+	// before the first upload) the dropdown just sets the mode for the next run.
+	if (current.job?.id && !isTerminal(current.job.status)) setRunMode(activeRun, mode);
 	state.update({ mode, observing: false, streamStatus: '' });
 	if (shouldResume) void startObservation({ promptFirst: false });
 }
@@ -246,6 +248,15 @@ function startSSEObservation(job, generation) {
 	source.onerror = () => {
 		if (generation !== observationGeneration || activeEventSource?.source !== source) return;
 		sseReconnectStarted(activeRun, streamId, source.readyState);
+		if (source.readyState === EventSource.CLOSED) {
+			// The browser has given up and will not retry (for example a reconnect got
+			// a 404 or 500). That is an observation failure, not a job failure: keep the
+			// last snapshot and offer Try again, which opens one new stream for the same job.
+			closeEventSource('connection_closed');
+			state.update({ observing: false, paused: false, streamStatus: '', resultError: 'Unable to check status.' });
+			return;
+		}
+		// CONNECTING: keep the same EventSource so the browser reconnects by itself.
 		state.update({ observing: true, streamStatus: 'reconnecting' });
 	};
 }

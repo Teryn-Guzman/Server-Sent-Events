@@ -16,6 +16,10 @@ func (app *application) serve() error {
 		WriteTimeout: 25 * time.Second,
 	}
 
+	// Open SSE streams never finish on their own, so tell them to stop when
+	// Shutdown begins; otherwise Shutdown waits for its full timeout.
+	srv.RegisterOnShutdown(app.beginShutdown)
+
 	shutdownError := app.gracefulShutdown(srv)
 
 	app.logger.Info("starting server", "addr", srv.Addr, "env", app.config.env)

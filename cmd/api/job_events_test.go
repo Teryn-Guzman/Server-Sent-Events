@@ -300,6 +300,45 @@ func TestJobEventsCancellationUnsubscribesObserver(t *testing.T) {
 	}
 }
 
+func TestJobEventsServerShutdownEndsOpenStreams(t *testing.T) {
+	reader := &sseTestReader{job: &data.ImageJob{PublicID: testSSEJobID, Status: "processing", Version: 1}}
+	app := testSSEApp(reader)
+	app.shutdownCh = make(chan struct{})
+	writers := []*sseTestWriter{newSSETestWriter(), newSSETestWriter()}
+	done := make([]chan struct{}, len(writers))
+	for index, writer := range writers {
+		request := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+testSSEJobID+"/events", nil)
+		request.SetPathValue("id", testSSEJobID)
+		done[index] = make(chan struct{})
+		go func(writer http.ResponseWriter, request *http.Request, finished chan struct{}) {
+			app.getJobEventsHandler(writer, request)
+			close(finished)
+		}(writer, request, done[index])
+		waitSSEFlush(t, writer)
+	}
+
+	app.beginShutdown()
+	app.beginShutdown() // a second call must not panic on a closed channel
+
+	for index := range writers {
+		select {
+		case <-done[index]:
+		case <-time.After(time.Second):
+			t.Fatalf("observer %d stayed open after server shutdown began", index)
+		}
+	}
+	if len(app.jobNotifier.subscribers[testSSEJobID]) != 0 {
+		t.Fatal("shutdown did not unsubscribe observers")
+	}
+	if app.activeSSE.Load() != 0 {
+		t.Fatalf("active SSE count = %d after shutdown, want 0", app.activeSSE.Load())
+	}
+	// Stopping observation must not alter the job itself.
+	if reader.job.Status != "processing" || reader.job.Version != 1 {
+		t.Fatalf("shutdown changed the job: status=%q version=%d", reader.job.Status, reader.job.Version)
+	}
+}
+
 func TestJobEventsDatabaseErrorBeforeHeadersUsesJSONError(t *testing.T) {
 	reader := &sseTestReader{err: errors.New("database unavailable")}
 	app := testSSEApp(reader)
@@ -315,6 +354,67 @@ func TestJobEventsDatabaseErrorBeforeHeadersUsesJSONError(t *testing.T) {
 	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
 		t.Fatalf("Content-Type = %q, want application/json", got)
 	}
+}
+
+func TestJobEventsSkipsUnchangedVersionsAndCoalescesGaps(t *testing.T) {
+	reader := &sseTestReader{job: &data.ImageJob{PublicID: testSSEJobID, Status: "processing", Version: 2, Stage: "starting"}}
+	app := testSSEApp(reader)
+	writer := newSSETestWriter()
+	request := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+testSSEJobID+"/events", nil)
+	request.SetPathValue("id", testSSEJobID)
+	done := make(chan struct{})
+	go func() {
+		app.getJobEventsHandler(writer, request)
+		close(done)
+	}()
+	waitSSEFlush(t, writer)
+
+	// A wake-up whose re-read shows no newer persisted version must not send an event.
+	app.jobNotifier.publish(testSSEJobID)
+	waitSSEReads(t, reader, 2)
+	time.Sleep(20 * time.Millisecond)
+	if _, body := writer.result(); strings.Count(body, "event: job-update\n") != 1 {
+		t.Fatalf("an unchanged version produced an extra event: %s", body)
+	}
+
+	// Versions 3 and 4 are never observed by this stream. It must still send the
+	// current snapshot, including the terminal version, rather than a replay.
+	reader.setJob(&data.ImageJob{
+		PublicID: testSSEJobID, Status: "completed", Version: 5, Stage: "display_ready", VariantsCompleted: 3,
+		Variants: []data.Variant{{Name: "thumbnail"}, {Name: "preview"}, {Name: "display"}},
+	})
+	app.jobNotifier.publish(testSSEJobID)
+	waitSSEFlush(t, writer)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stream did not close after the terminal snapshot")
+	}
+	_, body := writer.result()
+	if strings.Count(body, "event: job-update\n") != 2 {
+		t.Fatalf("expected the initial and terminal snapshots only: %s", body)
+	}
+	if !strings.Contains(body, `"version":5`) {
+		t.Fatalf("terminal snapshot missing: %s", body)
+	}
+	if strings.Contains(body, `"version":3`) || strings.Contains(body, `"version":4`) {
+		t.Fatalf("skipped versions must not be replayed: %s", body)
+	}
+}
+
+func waitSSEReads(t *testing.T, reader *sseTestReader, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		reader.mu.Lock()
+		reads := reader.reads
+		reader.mu.Unlock()
+		if reads >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("handler did not re-read the job after the wake-up (want %d reads)", want)
 }
 
 func waitSSEFlush(t *testing.T, writer *sseTestWriter) {

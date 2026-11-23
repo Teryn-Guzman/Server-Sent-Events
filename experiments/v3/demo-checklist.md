@@ -1,0 +1,16 @@
+# Assessment 3 demonstration checklist (10–15 minutes + 5 for questions)
+
+- [ ] State the starting point: the finished Assessment 2 app (baseline commit/tag), PostgreSQL owns job state, the worker does the processing, and SSE is a third observation mode.
+- [ ] Show the request and event frames: one `GET /v1/jobs/{id}/events` staying pending in DevTools (**EventStream** tab) with `job-update` frames arriving; point out `Content-Type: text/event-stream`, the blank line ending each frame, and that there is no `id:` field.
+- [ ] Explain what the GET keeps open and what `Flush` does: it makes the frame available to the browser; it does not end the response.
+- [ ] Walk the lifecycle: worker commit raises the job version, notification after commit, every subscribed SSE handler wakes, re-reads PostgreSQL, sends a newer snapshot, `EventSource` listener renders it. Mention subscribe-before-read.
+- [ ] A second observer on the same job receives every update (correctness check, outside the single-observer measured runs). The page only observes jobs it uploaded, so in a second tab's DevTools Console run `new EventSource('/v1/jobs/JOB_ID/events')` with a `job-update` listener (or `curl -N` the same URL) and compare its versions with the first tab.
+- [ ] Toggle Network Offline/Online mid-job: the page shows reconnecting, the same `EventSource` reconnects, the latest snapshot arrives, the job is not marked failed, and no second upload happens.
+- [ ] **Stop observing** while the job runs: the stream closes, the worker keeps going, the job reaches its real outcome (check with a plain `GET /v1/jobs/{id}`); **Resume observation** opens one new stream for the same job.
+- [ ] Let a job finish while observed: the terminal snapshot renders once, `EventSource.close()` is called, and no reconnect follows. Show a failed job too (corrupt PNG).
+- [ ] Optional: press Ctrl+C on the server while a stream is open; the streams end at once instead of holding shutdown for 30 s, and the worker and job are untouched.
+- [ ] Explain why a reconnecting client gets the latest snapshot instead of a replay of every missed version (snapshot semantics, no `Last-Event-ID`), and that skipped versions are not data loss.
+- [ ] Show the long-poll comparison: the same job in long-poll mode (held request, 204 at the deadline, next request) next to the SSE stream.
+- [ ] Show the run-by-run table, the summary table, and both graphs (observation GETs / SSE stream GETs by condition and method; detection delay in ms), the individual repetitions, and the raw client/server logs they came from.
+- [ ] Interpret the evidence: separate processing time from detection delay, explain version gaps, and state why fewer requests do not by themselves prove lower total resource use (held handlers, stream duration, subscriber bookkeeping, database reads, event traffic, heartbeats).
+- [ ] State limitations (one computer, one image, one observer, three runs per cell, no capacity claims) and the recommendation, using actual run IDs and numbers.

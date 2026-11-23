@@ -139,11 +139,26 @@ func (app *application) getJobEventsHandler(w http.ResponseWriter, r *http.Reque
 			}
 			heartbeats++
 			app.logger.Info("sse heartbeat", "stream_id", streamID, "job_id", jobID, "count", heartbeats)
+		case <-app.shutdownCh:
+			// A nil channel (tests that do not set one) blocks forever, so this
+			// case only fires when the server has begun shutting down.
+			closeReason = "server_shutdown"
+			return
 		case <-r.Context().Done():
 			closeReason = "client_disconnected"
 			return
 		}
 	}
+}
+
+// beginShutdown signals every open SSE handler to return. It is safe to call
+// more than once. Ending a stream does not touch the worker or the job.
+func (app *application) beginShutdown() {
+	app.shutdownOnce.Do(func() {
+		if app.shutdownCh != nil {
+			close(app.shutdownCh)
+		}
+	})
 }
 
 func (app *application) beginSSEStream() (int64, int64) {
